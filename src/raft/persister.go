@@ -17,7 +17,7 @@ type Persister struct {
 	snapshot  []byte
 }
 
-func MakePersister() *Persister {
+func MakePersister() *Persister { 
 	return &Persister{}
 }
 
@@ -48,7 +48,7 @@ func (ps *Persister) RaftStateSize() int {
 	return len(ps.raftstate)
 }
 
-// Save both Raft state and K/V snapshot as a single atomic action,
+// Save both Raft state and K/V snapshot as a single atomic action,165.24
 // to help avoid them getting out of sync.
 func (ps *Persister) Save(raftstate []byte, snapshot []byte) {
 	ps.mu.Lock()

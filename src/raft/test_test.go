@@ -55,7 +55,7 @@ func TestReElection3A(t *testing.T) {
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
 
-	cfg.begin("Test (3A): election after network failure")
+	cfg.begin("Test (2A): election after network failure")
 
 	leader1 := cfg.checkOneLeader()
 
@@ -132,7 +132,11 @@ func TestBasicAgree3B(t *testing.T) {
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
+
+		// fmt.Println(index)
+
 		nd, _ := cfg.nCommitted(index)
+
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
@@ -148,6 +152,9 @@ func TestBasicAgree3B(t *testing.T) {
 
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
+
+// 根据RPC的字节数，检查每个命令是否只发送给每个peer一次。
+
 func TestRPCBytes3B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -180,6 +187,7 @@ func TestRPCBytes3B(t *testing.T) {
 }
 
 // test just failure of followers.
+// 测试追随者的失败。
 func TestFollowerFailure3B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -225,6 +233,7 @@ func TestFollowerFailure3B(t *testing.T) {
 }
 
 // test just failure of leaders.
+// 考验领导者的失败。
 func TestLeaderFailure3B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -266,6 +275,8 @@ func TestLeaderFailure3B(t *testing.T) {
 
 // test that a follower participates after
 // disconnect and re-connect.
+
+// 在断开连接和重新连接后测试跟随者是否参与。
 func TestFailAgree3B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -363,6 +374,7 @@ loop:
 	for try := 0; try < 5; try++ {
 		if try > 0 {
 			// give solution some time to settle
+			// 给解决方案一些时间来解决
 			time.Sleep(3 * time.Second)
 		}
 
@@ -370,6 +382,7 @@ loop:
 		_, term, ok := cfg.rafts[leader].Start(1)
 		if !ok {
 			// leader moved on really quickly
+			// 领导行动真的很快
 			continue
 		}
 
@@ -380,11 +393,18 @@ loop:
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
+				// fmt.Println("+++++++++++++++++++++++++++++++++++++++++")
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+
+				// fmt.Println(i, term1, ok)
+				// fmt.Println("+++++++++++++++++++++++++++++++++++++++++")
+
 				if term1 != term {
+					fmt.Print("++++++++++++++++++++++++++++++++++++\nTerm 改变\n++++++++++++++++++++++++++++++++++++\n")
 					return
 				}
 				if ok != true {
+					fmt.Print("++++++++++++++++++++++++++++++++++++\nLeader 改变\n++++++++++++++++++++++++++++++++++++\n")
 					return
 				}
 				is <- i
@@ -397,6 +417,8 @@ loop:
 		for j := 0; j < servers; j++ {
 			if t, _ := cfg.rafts[j].GetState(); t != term {
 				// term changed -- can't expect low RPC counts
+				// term 已更改 -- 不能期望RPC计数低
+				// fmt.Println(t, term)
 				continue loop
 			}
 		}
@@ -410,6 +432,8 @@ loop:
 					// peers have moved on to later terms
 					// so we can't expect all Start()s to
 					// have succeeded
+					// peers已经进入了较晚的任期
+					// 因此我们不能指望所有的 Start() 都成功
 					failed = true
 					break
 				}
@@ -421,6 +445,7 @@ loop:
 
 		if failed {
 			// avoid leaking goroutines
+			// 避免 goroutine 泄露
 			go func() {
 				for range is {
 				}

@@ -142,7 +142,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
-			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			log.Printf("%v: log: %v; %v: server: %v\n", i, cfg.logs[i], j, cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -464,6 +464,7 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
+				// fmt.Println(i)
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}
@@ -485,6 +486,7 @@ func (cfg *config) checkNoLeader() {
 }
 
 // how many servers think a log entry is committed?
+// 有多少服务器认为提交了日志条目？
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
@@ -511,6 +513,8 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 // wait for at least n servers to commit.
 // but don't wait forever.
+// 等待至少 n 个服务器提交。
+// 但不要无限等待。
 func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	to := 10 * time.Millisecond
 	for iters := 0; iters < 30; iters++ {
@@ -526,7 +530,9 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 			for _, r := range cfg.rafts {
 				if t, _ := r.GetState(); t > startTerm {
 					// someone has moved on
-					// can no longer guarantee that we'll "win"
+					// can no longer guarantee that we'll "win"					
+					// 有人已经继续前进
+					// 不能再保证我们会“获胜”
 					return -1
 				}
 			}
@@ -569,6 +575,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					// fmt.Printf("选出的领导人是%v, 插入的位置是%v\n", rf.me, index1)
 					index = index1
 					break
 				}
@@ -578,9 +585,15 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
+			
+			// 有人声称自己是领导者，并已经
+			// 提交了我们的命令；等待一段时间以达成一致。
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+
+				// fmt.Println("检测结果为", nd, " ", cmd1)
+
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
