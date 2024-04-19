@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fmt"
+	// "fmt"
 	"math"
 
 	//	"6.5840/labgob"
@@ -99,6 +99,11 @@ type Raft struct {
 	LastLogIndex int
 	LastLogTerm  int
 
+	// 快照
+	LastSnapshotIndex int
+	LastSnapshotTerm  int
+	snapshot          []byte
+
 	channel chan ApplyMsg
 
 	// for leader
@@ -121,7 +126,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// fmt.Println("Term", rf.currentTerm, "取得", rf.me, "的状态为", rf.stat)
+	// // fmt.Println("Term", rf.currentTerm, "取得", rf.me, "的状态为", rf.stat)
 	term = rf.currentTerm
 	if rf.stat == Leader {
 		isleader = true
@@ -154,7 +159,18 @@ func (rf *Raft) persist() {
 	e.Encode(rf.votedFor)
 	e.Encode(rf.logs)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+
+	if rf.snapshot == nil {
+		rf.persister.Save(raftstate, nil)
+	} else {
+		w_ := new(bytes.Buffer)
+		e_ := labgob.NewEncoder(w_)
+		e_.Encode(rf.LastSnapshotIndex)
+		e_.Encode(rf.LastLogTerm)
+		e_.Encode(rf.snapshot)
+		snapshot := w_.Bytes()
+		rf.persister.Save(raftstate, snapshot)
+	}
 }
 
 // restore previously persisted state.
@@ -182,7 +198,7 @@ func (rf *Raft) readPersist(data []byte) {
 	var logs []Log
 
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
-		fmt.Println(rf.me, "读取持久化失败")
+		Debug(dWarn, "S%v 读取持久化失败", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -190,7 +206,26 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.LastLogTerm = rf.logs[len(rf.logs)-1].Term
 		rf.LastLogIndex = rf.logs[len(rf.logs)-1].Index
 	}
+}
 
+func (rf *Raft) ReadSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var LastSnapshotIndex int
+	var LastSnapshotTerm int
+	var snapshot []byte
+
+	if d.Decode(&LastSnapshotIndex) != nil || d.Decode(&LastSnapshotTerm) != nil || d.Decode(&snapshot) != nil {
+		Debug(dWarn, "S%v 读取快照持久化失败", rf.me)
+	} else {
+		rf.LastSnapshotIndex = LastSnapshotIndex
+		rf.LastSnapshotTerm = LastSnapshotTerm
+		rf.snapshot = snapshot
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -199,7 +234,23 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	rf.snapshot = snapshot
 
+	// fmt.Println(rf.me, "当前快照位置为", rf.LastSnapshotIndex, "index: ", index)
+
+	var i = rf.logs[index-rf.LastSnapshotIndex].Index
+	var t = rf.logs[index-rf.LastSnapshotIndex].Term
+
+	rf.logs = rf.logs[index - rf.LastSnapshotIndex : ]
+
+	rf.LastSnapshotIndex = i
+	rf.LastSnapshotTerm = t
+
+	// fmt.Println(rf.me, "保存快照位置为", rf.LastSnapshotIndex, "index: ", index)
+
+	rf.persist()
+	rf.mu.Unlock()
 }
 
 // example RequestVote RPC arguments structure.
@@ -252,7 +303,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) ProcessElection(args RequestVoteArgs, target_server int) {
-	
+
 	reply := RequestVoteReply{}
 	ok := rf.sendRequestVote(target_server, &args, &reply)
 	if !ok {
@@ -299,7 +350,6 @@ func (rf *Raft) ProcessElection(args RequestVoteArgs, target_server int) {
 		}
 
 		go rf.Heartticker()
-
 
 		Debug(dVote, "S %v 在Term %v成为领导人, 总票数为%v", rf.me, rf.currentTerm, rf.winvote)
 		return
@@ -424,12 +474,14 @@ func (rf *Raft) commit() {
 			rf.cond.Wait()
 		}
 		rf.mu_cond.Unlock()
-		
-		rf.mu.Lock()
-		command := rf.logs[rf.lastApplied+1].Command
-		index := rf.logs[rf.lastApplied+1].Index
 
-		Debug(dCommit, "S%v commit %v, Index %v, Term %v", rf.me, command, index, rf.logs[rf.lastApplied+1].Term)
+		rf.mu.Lock()
+		command := rf.logs[rf.lastApplied + 1 - rf.LastSnapshotIndex].Command
+		index := rf.logs[rf.lastApplied + 1 - rf.LastSnapshotIndex].Index
+
+		// fmt.Println("提交信息", rf.lastApplied, rf.commitIndex, index, rf.LastSnapshotIndex)
+
+		Debug(dCommit, "S%v commit %v, Index %v, Term %v", rf.me, command, index, rf.logs[rf.lastApplied+1-rf.LastSnapshotIndex].Term)
 		rf.mu.Unlock()
 
 		applymsg := ApplyMsg{
@@ -484,7 +536,7 @@ func (rf *Raft) ProcessHeart(args AppendEntriesArgs, target_server int) {
 			rf.matchIndex[target_server] = args.Entries[len(args.Entries)-1].Index
 		}
 
-		if rf.logs[rf.matchIndex[target_server]].Term == rf.currentTerm && rf.matchIndex[target_server] > rf.commitIndex {
+		if rf.logs[rf.matchIndex[target_server]-rf.LastSnapshotIndex].Term == rf.currentTerm && rf.matchIndex[target_server] > rf.commitIndex {
 			num := 1
 			for i := range rf.peers {
 				if i != rf.me && rf.matchIndex[i] >= rf.matchIndex[target_server] {
@@ -492,7 +544,7 @@ func (rf *Raft) ProcessHeart(args AppendEntriesArgs, target_server int) {
 				}
 			}
 
-			// fmt.Println("符合的数目：", num)
+			// // fmt.Println("符合的数目：", num)
 
 			if num >= len(rf.peers)/2+1 {
 				// todo 提交给上层
@@ -516,7 +568,7 @@ func (rf *Raft) ProcessHeart(args AppendEntriesArgs, target_server int) {
 		i := reply.LogIndex2
 
 		for ; i >= reply.LogIndex1; i-- {
-			if rf.logs[i].Term == reply.LogTerm {
+			if rf.logs[i-rf.LastSnapshotIndex].Term == reply.LogTerm {
 				break
 			}
 		}
@@ -550,19 +602,19 @@ func (rf *Raft) DoHeart() {
 		}
 
 		args := AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
 			LeaderCommit: rf.commitIndex,
 		}
 
 		args.PrevLogIndex = rf.nextIndex[target_server] - 1
-		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex-rf.LastSnapshotIndex].Term
 
 		if rf.nextIndex[target_server] == rf.LastLogIndex+1 {
 			args.Entries = nil
 		} else {
 			args.Entries = make([]Log, rf.LastLogIndex+1-rf.nextIndex[target_server])
-			copy(args.Entries, rf.logs[rf.nextIndex[target_server]:rf.LastLogIndex+1])
+			copy(args.Entries, rf.logs[rf.nextIndex[target_server]-rf.LastSnapshotIndex:rf.LastLogIndex+1-rf.LastSnapshotIndex])
 		}
 
 		// Debug(dHeart, "S%v -> S%v arg: [Term: %v, LeaderId: %v, PrevLogTerm: %v, PrevLogIndex: %v, Entries: %v, LeaderCommit: %v]", rf.me, target_server, args.Term, args.LeaderId, args.PrevLogTerm, args.PrevLogIndex, args.Entries, args.LeaderCommit)
@@ -582,7 +634,6 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -609,12 +660,12 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.LastLogIndex >= args.PrevLogIndex {
 		rf.LastLogIndex = args.PrevLogIndex
 
-		rf.logs = rf.logs[:rf.LastLogIndex+1] //保证长度一致
+		rf.logs = rf.logs[:rf.LastLogIndex+1-rf.LastSnapshotIndex] //保证长度一致
 
-		if rf.logs[rf.LastLogIndex].Term == args.PrevLogTerm { // 等于直接修改log
+		if rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term == args.PrevLogTerm { // 等于直接修改log
 			rf.logs = append(rf.logs, args.Entries...)
 			rf.LastLogIndex += len(args.Entries)
-			rf.LastLogTerm = rf.logs[rf.LastLogIndex].Term
+			rf.LastLogTerm = rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term
 			reply.Success = true
 			Debug(dLog, "S%v 最终日志为：%v", rf.me, rf.logs)
 
@@ -629,31 +680,32 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 
-		if rf.logs[rf.LastLogIndex].Term < args.PrevLogTerm {
+		if rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term < args.PrevLogTerm {
 			reply.Success = false
 			reply.LogIndex2 = rf.LastLogIndex
 
 			i := rf.LastLogIndex
-			for ; i > 0 && rf.logs[i].Term == rf.logs[rf.LastLogIndex].Term; i-- {
+			for ; i-rf.LastSnapshotIndex > 0 && rf.logs[i-rf.LastSnapshotIndex].Term == rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term; i-- {
 			} // 寻找当前term的index范围
 
 			reply.LogIndex1 = i + 1
 
-			reply.LogTerm = rf.logs[rf.LastLogIndex].Term
+			reply.LogTerm = rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term
 
 			// reply.Logs = rf.logs
 
 			return
 		}
 
-		if rf.logs[rf.LastLogIndex].Term > args.PrevLogTerm {
+		if rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term > args.PrevLogTerm {
 			reply.Success = false
 			reply.LogIndex2 = rf.LastLogIndex
 
 			i := rf.LastLogIndex
-			for ; i > 0 && rf.logs[i].Term > args.PrevLogTerm; i-- {
+			for ; i-rf.LastSnapshotIndex > 0 && rf.logs[i-rf.LastSnapshotIndex].Term > args.PrevLogTerm; i-- {
 			} // 找到小于等于PrevLogTerm的位置
 
+			// todo
 			if i == 0 {
 				reply.LogIndex1 = 0
 				reply.LogIndex2 = 0
@@ -664,10 +716,10 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 
 			reply.LogIndex2 = i
-			for ; i > 0 && rf.logs[i].Term == rf.logs[rf.LastLogIndex].Term; i-- {
+			for ; i-rf.LastSnapshotIndex > 0 && rf.logs[i-rf.LastSnapshotIndex].Term == rf.logs[rf.LastLogIndex-rf.LastSnapshotIndex].Term; i-- {
 			} // 寻找当前term的index范围
 			reply.LogIndex1 = i + 1
-			reply.LogTerm = rf.logs[reply.LogIndex2].Term
+			reply.LogTerm = rf.logs[reply.LogIndex2-rf.LastSnapshotIndex].Term
 
 			// reply.Logs = rf.logs
 			return
@@ -676,8 +728,10 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = false
 	i := rf.LastLogIndex
-	for ; i > 0 && rf.logs[i].Term > args.PrevLogTerm; i-- {
+	for ; i-rf.LastSnapshotIndex > 0 && rf.logs[i-rf.LastSnapshotIndex].Term > args.PrevLogTerm; i-- {
 	} // 找到小于等于PrevLogTerm的位置
+
+	// todo
 	if i == 0 {
 		reply.LogIndex1 = 0
 		reply.LogIndex2 = 0
@@ -687,10 +741,10 @@ func (rf *Raft) AppednEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	reply.LogIndex2 = i
-	for ; i > 0 && rf.logs[i].Term == rf.logs[rf.LastLogIndex].Term; i-- {
+	for ; i-rf.LastSnapshotIndex > 0 && rf.logs[i-rf.LastSnapshotIndex].Term == rf.logs[rf.LastLogIndex].Term; i-- {
 	} // 寻找当前term的index范围
 	reply.LogIndex1 = i + 1
-	reply.LogTerm = rf.logs[reply.LogIndex2].Term
+	reply.LogTerm = rf.logs[reply.LogIndex2-rf.LastSnapshotIndex].Term
 
 	// reply.Logs = rf.logs
 	// return
@@ -883,21 +937,25 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
+	rf.LastSnapshotIndex = 0
+	rf.LastSnapshotTerm = 0
+	rf.snapshot = nil
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.ReadSnapshot(persister.ReadSnapshot())
 
 	// rf.mu.Lock()
-	// fmt.Println("初始化状态")
-	// fmt.Println(rf.me, rf.LastLogTerm, rf.LastLogTerm)
-	// // fmt.Println(rf.PrevLogTerm, rf.PrevLogIndex)
-	// fmt.Println(" ")
+	// // fmt.Println("初始化状态")
+	// // fmt.Println(rf.me, rf.LastLogTerm, rf.LastLogTerm)
+	// // // fmt.Println(rf.PrevLogTerm, rf.PrevLogIndex)
+	// // fmt.Println(" ")
 	// rf.mu.Unlock()
 
 	// 提交到kv服务器
 	rf.channel = applyCh
 
-	// fmt.Println(len(rf.peers))
+	// // fmt.Println(len(rf.peers))
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
